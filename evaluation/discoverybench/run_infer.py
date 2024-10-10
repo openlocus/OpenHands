@@ -4,8 +4,10 @@ import os
 
 import git
 import pandas as pd
-from datasets import load_dataset
 
+from evaluation.discoverybench.eval_utils.eval_w_subhypo_gen import (
+    run_eval_gold_vs_gen_NL_hypo_workflow,
+)
 from evaluation.discoverybench.utils import extract_gen_hypo_from_logs
 from evaluation.utils.shared import (
     EvalMetadata,
@@ -29,7 +31,9 @@ from openhands.events.action import AgentFinishAction, CmdRunAction, MessageActi
 from openhands.events.observation import CmdOutputObservation
 from openhands.runtime.runtime import Runtime
 
-CSV_FILES = {}
+EVALUATION_LLM = 'gpt-4-1106-preview'
+
+DATA_FILES = {}
 
 AGENT_CLS_TO_FAKE_USER_RESPONSE_FN = {
     'CodeActAgent': codeact_user_response,
@@ -199,16 +203,11 @@ def process_instance(
     else:
         logger.info(f'Starting evaluation for instance {instance.instance_id}.')
 
-    workflow_tags = instance.workflow_tags
-    domain_knowledge = instance.domain_knowledge
-    datasets = json.loads(instance.datasets)
-    queries = json.loads(instance.queries)
-
     problem_statement = get_dv_query_for_real(
-        datasets=datasets,
-        question=queries[0]['question'],
-        domain_knowledge=domain_knowledge,
-        workflow_tags=workflow_tags,
+        datasets=instance.datasets,
+        question=instance.query,
+        domain_knowledge=instance.domain_knowledge,
+        workflow_tags=instance.workflow_tags,
     )
 
     # Prepare instruction
@@ -228,7 +227,7 @@ def process_instance(
 
     # Here's how you can run the agent (similar to the `main` function) and get the final task state
     runtime = create_runtime(config, sid=sid)
-    initialize_runtime(runtime, instance.csv_file)
+    initialize_runtime(runtime, instance.data_files)
 
     state: State | None = asyncio.run(
         run_controller(
@@ -252,6 +251,20 @@ def process_instance(
     # remove when it becomes unnecessary
     histories = state.history.compatibility_for_eval_history_pairs()
 
+    # Evaluation
+    eval_rec = run_eval_gold_vs_gen_NL_hypo_workflow(
+        query=instance.query,
+        gold_hypo=instance.gold_hypo,
+        gold_workflow='',
+        gen_hypo=test_result['gen_hypo'],
+        gen_workflow='',
+        dataset_meta=instance.dataset_metadata,
+        llm_used=EVALUATION_LLM,
+        dataset_type='real',
+    )
+
+    test_result['eval_rec'] = eval_rec
+
     # Save the output
     output = EvalOutput(
         instance_id=str(instance.instance_id),
@@ -265,13 +278,118 @@ def process_instance(
     return output
 
 
+def create_dataset(repo_location: str, split: str = 'test'):
+    # walk through the repository for test split
+    # as soon as a metadata_{}.json file is found, load
+    # it and extract domain knowledge, workflow tags, queries, datasets, gold_hypothesis,
+    # and gold_workflow
+    # add all these to a pandas dataframe
+
+    data_dict = {}
+
+    data_location = os.path.join(repo_location, 'discoverybench', 'real', split)
+    answer_key_location = os.path.join(repo_location, 'eval', 'answer_key_real.csv')
+
+    idx = 0
+
+    for root, dirs, files in os.walk(data_location):
+        for file in files:
+            if file.endswith('.json'):
+                if 'metadata' in file:
+                    metadata = json.load(open(os.path.join(root, file)))
+
+                    dataset = root.split('/')[-1]
+                    metadata_id = file.split('_')[-1].split('.')[0]
+                    domain = metadata.get('domain', '')
+                    domain_knowledge = metadata.get('domain_knowledge', '')
+                    workflow_tags = metadata.get('workflow_tags', '')
+                    datasets = metadata.get('datasets', [])
+                    queries = metadata.get('queries', [])
+                    gold_workflow = metadata.get('workflow')
+
+                    # loop through queries list to get queries and each query has qid; add that to dictionary
+                    for query in queries[0]:
+                        qid = query.get('qid', '')
+
+                        data = {
+                            'dataset': dataset,
+                            'metadata_id': metadata_id,
+                            'qid': qid,
+                            'domain': domain,
+                            'domain_knowledge': domain_knowledge,
+                            'workflow_tags': workflow_tags,
+                            'datasets': datasets,
+                            'question_type': query['question_type'],
+                            'query': query['question'],
+                            'gold_workflow': gold_workflow,
+                            'dataset_metadata': metadata,
+                        }
+
+                        data_dict[idx] = data
+                        idx += 1
+
+            if file.endswith('.csv'):
+                DATA_FILES[file] = os.path.join(root, file)
+            if file.endswith('.txt'):
+                DATA_FILES[file] = os.path.join(root, file)
+
+    df = pd.DataFrame.from_dict(data_dict, orient='index')
+
+    # add a column called instance_id to the dataset
+    df['instance_id'] = df.index
+
+    # add csv_file column to the dataset
+    df['data_files'] = df['datasets'].apply(lambda x: list_csv_files(x))
+
+    # load 'eval/answer_key_real.csv' from the repo
+    # this file contains 'gold_hypo'
+    # merge this file with the dataset with three columns: 'dataset', 'qid', 'metadata_id'
+
+    answer_key = pd.read_csv(answer_key_location)
+
+    # rename columns
+    answer_key = answer_key.rename(
+        columns={
+            'metadataid': 'metadata_id',
+            'query_id': 'qid',
+            'gold_hypothesis': 'gold_hypothesis',
+        }
+    )
+
+    df['qid'] = df['qid'].astype(int)
+    df['metadata_id'] = df['metadata_id'].astype(int)
+
+    answer_key['qid'] = answer_key['qid'].astype(int)
+    answer_key['metadata_id'] = answer_key['metadata_id'].astype(int)
+
+    df = pd.merge(df, answer_key, on=['dataset', 'metadata_id', 'qid'], how='left')
+
+    return df
+
+
+def update_csv_name(name):
+    name = name.replace('-', '_')
+
+    if 'meta_regression' in name:
+        name = name.replace('meta_regression', 'meta-regression')
+    if 'ML_enabled' in name:
+        name = name.replace('ML_enabled', 'ML-enabled')
+
+    return name
+
+
+def list_csv_files(list_of_datasets):
+    res = []
+    for ele in list_of_datasets:
+        for key, value in ele.items():
+            if key == 'name':
+                csv_file_name = update_csv_name(value)
+                res.append(DATA_FILES[csv_file_name])
+    return res
+
+
 if __name__ == '__main__':
     args = parse_arguments()
-
-    # load the huggingface dataset
-    dataset = load_dataset(
-        path='allenai/discoverybench', name='default', trust_remote_code=True
-    )
 
     # clone git repositor for csv files
     repo_url = 'https://github.com/allenai/discoverybench.git'
@@ -282,45 +400,10 @@ if __name__ == '__main__':
     except git.exc.GitCommandError:
         print('Repository already exists')
 
-    # walk through the cloned repository to find the csv files
-    for root, dirs, files in os.walk(
-        os.path.join(clone_directory, 'discoverybench', 'real', 'test')
-    ):
-        for file in files:
-            if file.endswith('.csv'):
-                CSV_FILES[file] = os.path.join(root, file)
-
-    db_tests = dataset['test'].to_pandas()
-    # add a column called instance_id to the dataset
-    db_tests['instance_id'] = db_tests.index
-    # add a column called csv_file to the dataset
-
-    def update_csv_name(name):
-        name = name.replace('-', '_')
-
-        if 'meta_regression' in name:
-            name = name.replace('meta_regression', 'meta-regression')
-        if 'ML_enabled' in name:
-            name = name.replace('ML_enabled', 'ML-enabled')
-
-        return name
-
-    # db_tests['csv_file'] = db_tests['datasets'].apply(lambda x: CSV_FILES[update_csv_name(json.loads(x)[0]['name'])])
-
-    def list_csv_files(list_of_datasets):
-        res = []
-        instance = json.loads(list_of_datasets)
-        for ele in instance:
-            for key, value in ele.items():
-                if key == 'name':
-                    csv_file_name = update_csv_name(value)
-                    res.append(CSV_FILES[csv_file_name])
-        return res
-
-    db_tests['csv_file'] = db_tests['datasets'].apply(lambda x: list_csv_files(x))
+    dataset = create_dataset(clone_directory)
 
     # check if there is any empty csv_file
-    if db_tests['csv_file'].isnull().any():
+    if dataset['data_files'].isnull().any():
         raise ValueError('Some csv files are missing.')
 
     llm_config = None
@@ -338,7 +421,7 @@ if __name__ == '__main__':
         args.eval_output_dir,
     )
     output_file = os.path.join(metadata.eval_output_dir, 'output.jsonl')
-    instances = prepare_dataset(db_tests, output_file, args.eval_n_limit)
+    instances = prepare_dataset(dataset, output_file, args.eval_n_limit)
 
     run_evaluation(
         instances,
