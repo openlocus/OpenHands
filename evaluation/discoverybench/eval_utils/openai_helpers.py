@@ -95,9 +95,9 @@ def get_response(client, prompt, max_retry=5, model='gpt-3.5-turbo', verbose=Fal
         )
 
         # COMMENT: changed from
-        # response.choices[0].message.content.strip().strip(' json').strip('')
+        # response.choices[0].message.content.strip().strip('```json').strip('```')
         content = response.choices[0].message.content
-        cleaned_content = content.replace('```json', '').replace('```', '').strip()
+        cleaned_content = content.split('```json')[1].split('```')[0].strip()
         output = cleaned_content
         try:
             response_json = json.loads(output)
