@@ -37,6 +37,16 @@ EVALUATION_LLM = 'gpt-4-1106-preview'
 
 DATA_FILES = {}
 
+LIBRARIES = [
+    'pandas',
+    'numpy',
+    'scipy',
+    'matplotlib',
+    'seaborn',
+    'scikit-learn',
+    'statsmodels',
+]
+
 AGENT_CLS_TO_FAKE_USER_RESPONSE_FN = {
     'CodeActAgent': codeact_user_response,
 }
@@ -67,6 +77,7 @@ def get_config(
     return config
 
 
+# TODO: add docstring
 def get_dv_query_for_real(
     datasets, question, domain_knowledge=None, workflow_tags=None
 ):
@@ -129,6 +140,12 @@ def initialize_runtime(runtime: Runtime, csv_file: list[str]):
             '/workspace',
         )
 
+    for lib in LIBRARIES:
+        action = CmdRunAction(command=f'pip install {lib}')
+        logger.info(action, extra={'msg_type': 'ACTION'})
+        obs = runtime.run_action(action)
+        assert obs.exit_code == 0
+
     logger.info(f"{'-' * 50} END Runtime Initialization Fn {'-' * 50}")
 
 
@@ -188,6 +205,7 @@ def complete_runtime(
     return test_result
 
 
+# TODO: add docstring
 def process_instance(
     instance: pd.Series,
     metadata: EvalMetadata,
@@ -279,7 +297,7 @@ def process_instance(
     )
     return output
 
-
+# TODO: add docstring
 def create_dataset(repo_location: str, split: str = 'test'):
     # walk through the repository for test split
     # as soon as a metadata_{}.json file is found, load
