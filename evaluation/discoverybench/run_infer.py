@@ -37,6 +37,16 @@ EVALUATION_LLM = 'gpt-4-1106-preview'
 
 DATA_FILES = {}
 
+LIBRARIES = [
+    'pandas',
+    'numpy',
+    'scipy',
+    'matplotlib',
+    'seaborn',
+    'scikit-learn',
+    'statsmodels',
+]
+
 AGENT_CLS_TO_FAKE_USER_RESPONSE_FN = {
     'CodeActAgent': codeact_user_response,
 }
@@ -70,6 +80,22 @@ def get_config(
 def get_dv_query_for_real(
     datasets, question, domain_knowledge=None, workflow_tags=None
 ):
+    """
+    Prepare a structured query for the agent to execute on the specified datasets.
+
+    This function constructs a query by compiling metadata from the provided datasets, along with any relevant domain knowledge and workflow tags.
+
+    Args:
+        datasets: List of datasets
+        question: Query to be answered
+        domain_knowledge: Domain knowledge if any
+        workflow_tags: Workflow tags if any
+
+    Returns:
+        query_to_dv: Query to be run on the dataset
+        dataset_meta: Metadata of the dataset
+    """
+
     dataset_meta = ''
     for dataset_metadata in datasets:
         dataset_meta += 'Dataset name: ' + dataset_metadata['name']
@@ -128,6 +154,12 @@ def initialize_runtime(runtime: Runtime, csv_file: list[str]):
             file,
             '/workspace',
         )
+
+    for lib in LIBRARIES:
+        action = CmdRunAction(command=f'pip install {lib}')
+        logger.info(action, extra={'msg_type': 'ACTION'})
+        obs = runtime.run_action(action)
+        assert obs.exit_code == 0
 
     logger.info(f"{'-' * 50} END Runtime Initialization Fn {'-' * 50}")
 
@@ -193,6 +225,23 @@ def process_instance(
     metadata: EvalMetadata,
     reset_logger: bool = True,
 ) -> EvalOutput:
+    """
+    Process and evaluate a single instance of the dataset.
+
+    This function executes the OpenHands agent
+    for a specific instance of the dataset. It retrieves
+    the agent's results and evaluates them against the gold
+    hypothesis.
+
+    Args:
+        instance: A single row of the dataset
+        metadata: Metadata for the evaluation
+        reset_logger: Whether to reset the logger
+
+    Returns:
+        output: EvalOutput object
+    """
+
     config = get_config(metadata)
 
     # use a session id for concurrent evaluation
@@ -281,11 +330,18 @@ def process_instance(
 
 
 def create_dataset(repo_location: str, split: str = 'test'):
-    # walk through the repository for test split
-    # as soon as a metadata_{}.json file is found, load
-    # it and extract domain knowledge, workflow tags, queries, datasets, gold_hypothesis,
-    # and gold_workflow
-    # add all these to a pandas dataframe
+    """
+    Create a dataset from the discoverybench repository
+    by walking through the repository and extracting metadata
+    from the metadata_{}.json files
+
+    Args:
+        repo_location: Location of the repository
+        split: Split of the dataset to use
+
+    Returns:
+        df: DataFrame containing the dataset instances
+    """
 
     data_dict = {}
 
